@@ -16,7 +16,7 @@ This is a Python package that interfaces with the EVE Online ESI API via OAuth2 
   - `auth.py` - OAuth2 SSO flow and token storage
   - `client.py` - ESI HTTP client with auto token refresh
   - `config.py` - Config loading
-  - `endpoints/` - ESI endpoint modules: `assets`, `characters`, `fittings`, `market`, `skills`, `universe`, `wallet`
+  - `endpoints/` - ESI endpoint modules: `assets`, `characters`, `fitting_analysis`, `fittings`, `hauling`, `market`, `navigation`, `skills`, `universe`, `wallet`
 
 ## Scripts Folder
 - All temporary or ad-hoc scripts must be saved to `scripts/` (e.g. `scripts/check_cargo.py`)

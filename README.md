@@ -16,13 +16,13 @@ graph TB
     end
 
     subgraph MCP["MCP Server · mcp_server.py"]
-        E["22 Tools\n──────────────────\nCharacter · Skills · Assets\nWallet · Fittings · Market\nUniverse"]
+        E["34 Tools\n──────────────────\nCharacter · Skills · Assets\nWallet · Fittings · Market\nUniverse · Navigation\nHauling · Fitting Analysis\nCross-Character"]
     end
 
     subgraph LIB["eve_esi library"]
         F["auth.py\nOAuth2 SSO + PKCE"]
         G["client.py\nESI HTTP Client\nauto token refresh"]
-        H["endpoints/\nassets · characters · fittings\nmarket · skills · universe · wallet"]
+        H["endpoints/\nassets · characters · fittings\nfitting_analysis · hauling · market\nnavigation · skills · universe · wallet"]
     end
 
     subgraph EVE["EVE Online"]
@@ -243,9 +243,11 @@ mindmap
   root((EVE ESI\nMCP Tools))
     Character
       list_authenticated_characters
+      set_active_character
       get_character_info
       get_character_location
       get_character_ship
+      get_character_status
     Skills
       get_skills_summary
       get_skill_queue
@@ -254,6 +256,7 @@ mindmap
     Assets
       get_assets_list
       search_assets
+      get_assets_summary
     Wallet
       get_wallet_balance
       get_wallet_journal
@@ -270,32 +273,94 @@ mindmap
       search_item_type
       lookup_solar_system
       resolve_eve_names
+    Navigation
+      plan_route
+    Hauling
+      find_valuables_to_haul
+    Fitting Analysis
+      get_ship_fit_stats
+      compare_ship_fits
+      get_fit_required_skills
+      check_fit_readiness
+    Cross-Character
+      get_all_characters_status
+      compare_skills_across_characters
+      compare_wallets
 ```
+
+### Character & Status
 
 | Tool | Description |
 |---|---|
-| `list_authenticated_characters` | List all characters logged in via CLI |
+| `list_authenticated_characters` | List all characters with location, ship, wallet, and active status |
+| `set_active_character` | Set which character tools default to when `character_id` is omitted |
 | `get_character_info` | Name, corp, alliance, birthday, security status |
 | `get_character_location` | Current solar system |
 | `get_character_ship` | Ship currently flying |
+| `get_character_status` | One-call snapshot: location + ship + wallet balance |
+
+### Skills
+
+| Tool | Description |
+|---|---|
 | `get_skills_summary` | Total SP, unallocated SP, all trained skills |
 | `get_skill_queue` | Skills in queue with finish times |
 | `get_character_attributes` | Int/Mem/Per/Wil/Cha + remap availability |
 | `get_active_implants` | Implants currently plugged in |
+
+### Assets & Wallet
+
+| Tool | Description |
+|---|---|
 | `get_assets_list` | All owned items with location/quantity |
 | `search_assets` | Search assets by item type name |
+| `get_assets_summary` | Assets grouped by station with ISK values |
 | `get_wallet_balance` | ISK balance |
 | `get_wallet_journal` | Recent wallet transactions |
+
+### Fittings & Market
+
+| Tool | Description |
+|---|---|
 | `get_ship_fittings` | All saved fittings in-game |
 | `save_ship_fitting` | Save a new fitting to the game ✍️ |
 | `get_market_orders` | Character's active sell/buy orders |
 | `check_item_price` | Best buy/sell prices in any region (default: Jita) |
 | `get_blueprints_list` | All blueprints with ME/TE/runs info |
 | `get_industry_jobs_list` | Active/completed manufacturing & research jobs |
+
+### Universe & Navigation
+
+| Tool | Description |
+|---|---|
 | `lookup_item_type` | Full type info + dogma attributes for any item ID |
 | `search_item_type` | Find item IDs by name |
 | `lookup_solar_system` | System info (security, planets, stargates) |
 | `resolve_eve_names` | Convert any EVE IDs → names |
+| `plan_route` | Multi-system route planner with nearest-neighbour optimization |
+
+### Hauling
+
+| Tool | Description |
+|---|---|
+| `find_valuables_to_haul` | Scan assets for small/valuable items, plan pickup route with pricing |
+
+### Fitting Analysis
+
+| Tool | Description |
+|---|---|
+| `get_ship_fit_stats` | Parse an EFT fit → full stats (defense, fitting, nav, cap, mining, cargo) |
+| `compare_ship_fits` | Side-by-side comparison of two EFT fits with deltas |
+| `get_fit_required_skills` | Extract all skills required to fly a given EFT fit |
+| `check_fit_readiness` | Check which characters can fly a fit and what skills they're missing |
+
+### Cross-Character
+
+| Tool | Description |
+|---|---|
+| `get_all_characters_status` | Location, ship, and wallet for ALL authenticated characters |
+| `compare_skills_across_characters` | Compare specific skills (or total SP) across all characters |
+| `compare_wallets` | All wallet balances + total ISK across accounts |
 
 > ✍️ `save_ship_fitting` is the only tool that **writes** to your account. All others are read-only.
 
@@ -314,25 +379,42 @@ Once connected, you can ask natural language questions:
 "What are my saved fittings for a Rifter?"
 "Suggest a solo PvP fit for my Caldari Navy Hookbill based on my skills"
 "How much would I make if I sold all my blueprints in Jita?"
+"Compare my Covetor fit to a Hulk fit — which is better for moon mining?"
+"What skills do I need to fly this Hulk fit?" (paste EFT)
+"Which of my characters can fly this fit and what are they missing?"
+"Give me a status update on all my characters"
+"Compare Mining Barge and Astrogeology skills across all my alts"
+"Find all my valuable items scattered around and plan a pickup route back to Jita"
 ```
 
 ---
 
 ## Multi-Character Support
 
-You can authenticate multiple EVE characters. All MCP tools accept an optional `character_id` parameter:
+You can authenticate multiple EVE characters. Run `python cli.py login` once per character — all tokens are stored in `tokens.json`.
 
 ```bash
-# Log in a second character
+# Log in additional characters (run once per character)
 python cli.py login
 
 # List all authenticated characters
 python cli.py chars
 ```
 
-When `character_id` is omitted, the server uses the **first authenticated character**. Specify a character ID to query a specific one:
+### Active Character
 
-> *"Check the wallet balance for character 98765432"*
+Use `set_active_character` to choose which character tools default to when `character_id` is omitted. If no active character is set, the first authenticated character is used.
+
+All individual tools also accept an optional `character_id` parameter for ad-hoc queries on a specific alt.
+
+### Cross-Character Tools
+
+These tools operate on **all** authenticated characters at once — no need to query them one by one:
+
+- **`get_all_characters_status`** — Location, ship, and wallet for everyone in one call
+- **`compare_skills_across_characters`** — Compare specific skills or total SP side-by-side
+- **`compare_wallets`** — All wallet balances + fleet total ISK
+- **`check_fit_readiness`** — Check which characters can fly a given fit and what they're missing
 
 ---
 
@@ -340,7 +422,7 @@ When `character_id` is omitted, the server uses the **first authenticated charac
 
 ```
 eve-esi-tool/
-├── mcp_server.py          # MCP server — 22 tools for AI agents
+├── mcp_server.py          # MCP server — 34 tools for AI agents
 ├── cli.py                 # Command-line interface
 ├── config.example.yaml    # Config template
 ├── config.yaml            # Your config (not committed)
@@ -351,13 +433,16 @@ eve-esi-tool/
 │   ├── client.py          # ESI HTTP client with auto token refresh
 │   ├── config.py          # Config loading (YAML)
 │   └── endpoints/
-│       ├── assets.py      # Character assets
-│       ├── characters.py  # Character info, location, ship
-│       ├── fittings.py    # Ship fittings CRUD
-│       ├── market.py      # Orders, prices, blueprints, industry
-│       ├── skills.py      # Skills, queue, attributes, implants
-│       ├── universe.py    # Type info, system info, name resolution
-│       └── wallet.py      # Wallet balance and journal
+│       ├── assets.py          # Character assets
+│       ├── characters.py      # Character info, location, ship
+│       ├── fitting_analysis.py # EFT parsing, stats, comparison, skill requirements
+│       ├── fittings.py        # Ship fittings CRUD
+│       ├── hauling.py         # Asset analysis & pickup-run planner
+│       ├── market.py          # Orders, prices, blueprints, industry
+│       ├── navigation.py      # Route planning & multi-stop optimization
+│       ├── skills.py          # Skills, queue, attributes, implants
+│       ├── universe.py        # Type info, system info, name resolution
+│       └── wallet.py          # Wallet balance and journal
 └── CLAUDE.md              # Agent instructions (Claude Code / Cursor)
 ```
 
@@ -367,20 +452,22 @@ eve-esi-tool/
 
 | Scope | Enables |
 |---|---|
-| `esi-skills.read_skills.v1` | `get_skills_summary` |
+| `esi-skills.read_skills.v1` | `get_skills_summary`, `compare_skills_across_characters`, `check_fit_readiness` |
 | `esi-skills.read_skillqueue.v1` | `get_skill_queue`, `get_character_attributes` |
 | `esi-clones.read_implants.v1` | `get_active_implants` |
-| `esi-assets.read_assets.v1` | `get_assets_list`, `search_assets` |
-| `esi-wallet.read_character_wallet.v1` | `get_wallet_balance`, `get_wallet_journal` |
+| `esi-assets.read_assets.v1` | `get_assets_list`, `search_assets`, `get_assets_summary`, `find_valuables_to_haul` |
+| `esi-wallet.read_character_wallet.v1` | `get_wallet_balance`, `get_wallet_journal`, `compare_wallets` |
 | `esi-fittings.read_fittings.v1` | `get_ship_fittings` |
 | `esi-fittings.write_fittings.v1` | `save_ship_fitting` |
 | `esi-markets.read_character_orders.v1` | `get_market_orders` |
 | `esi-characters.read_blueprints.v1` | `get_blueprints_list` |
 | `esi-industry.read_character_jobs.v1` | `get_industry_jobs_list` |
-| `esi-location.read_location.v1` | `get_character_location` |
-| `esi-location.read_ship_type.v1` | `get_character_ship` |
+| `esi-location.read_location.v1` | `get_character_location`, `get_character_status`, `get_all_characters_status` |
+| `esi-location.read_ship_type.v1` | `get_character_ship`, `get_character_status`, `get_all_characters_status` |
 | `esi-contracts.read_character_contracts.v1` | Future: contract tools |
 | `esi-universe.read_structures.v1` | Asset locations in player structures |
+
+> **Note:** Fitting analysis tools (`get_ship_fit_stats`, `compare_ship_fits`, `get_fit_required_skills`) and universe/navigation tools (`plan_route`, `lookup_item_type`, etc.) use **public ESI endpoints** and don't require any scopes.
 
 ---
 
