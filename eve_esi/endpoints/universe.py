@@ -59,8 +59,43 @@ def resolve_ids(client: ESIClient, names: list[str]) -> dict[str, list[dict[str,
 
 
 def resolve_names(client: ESIClient, ids: list[int]) -> list[dict[str, Any]]:
-    """Resolve IDs to names. Returns list of {id, name, category}."""
+    """Resolve IDs to names. Returns list of {id, name, category}.
+
+    Automatically chunks into batches of 1000 (ESI limit).
+    """
     if not ids:
         return []
-    return client.post("/universe/names/", json_data=ids, authenticated=False)
+    results: list[dict[str, Any]] = []
+    unique = list(set(ids))
+    for i in range(0, len(unique), 1000):
+        chunk = unique[i:i + 1000]
+        results.extend(client.post("/universe/names/", json_data=chunk, authenticated=False))
+    return results
+
+
+def get_route(
+    client: ESIClient,
+    origin: int,
+    destination: int,
+    flag: str = "shortest",
+) -> list[int]:
+    """Get a route between two solar systems.
+
+    Args:
+        origin: Origin solar system ID.
+        destination: Destination solar system ID.
+        flag: Route preference — 'shortest', 'secure', or 'insecure'.
+
+    Returns:
+        Ordered list of solar system IDs along the route (including origin
+        and destination).
+    """
+    if origin == destination:
+        return [origin]
+    params: dict[str, Any] = {"flag": flag}
+    return client.get(
+        f"/route/{origin}/{destination}/",
+        authenticated=False,
+        params=params,
+    )
 

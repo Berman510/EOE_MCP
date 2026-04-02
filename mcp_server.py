@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from eve_esi.config import AppConfig
 from eve_esi.client import ESIClient
 from eve_esi.endpoints import characters, skills, assets, wallet, fittings, market, universe
+from eve_esi.endpoints import navigation, hauling, fitting_analysis
 
 # Initialize MCP server
 mcp = FastMCP(
@@ -32,6 +33,7 @@ mcp = FastMCP(
 # Global client instance - lazily initialized
 _config: AppConfig | None = None
 _clients: dict[int, ESIClient] = {}
+_active_character_id: int | None = None
 
 
 def _get_config() -> AppConfig:
@@ -42,19 +44,37 @@ def _get_config() -> AppConfig:
 
 
 def _get_client(character_id: int | None = None) -> ESIClient:
+    global _active_character_id
     config = _get_config()
     if character_id is None:
-        # Use first available character
-        from eve_esi.auth import TokenStore
-        store = TokenStore(config.token_storage.path)
-        chars = store.get_all()
-        if not chars:
-            raise RuntimeError("No authenticated characters. Run `python cli.py login` first.")
-        character_id = next(iter(chars))
+        if _active_character_id is not None:
+            character_id = _active_character_id
+        else:
+            # Use first available character
+            from eve_esi.auth import TokenStore
+            store = TokenStore(config.token_storage.path)
+            chars = store.get_all()
+            if not chars:
+                raise RuntimeError("No authenticated characters. Run `python cli.py login` first.")
+            character_id = next(iter(chars))
 
     if character_id not in _clients:
         _clients[character_id] = ESIClient(config, character_id)
     return _clients[character_id]
+
+
+def _get_all_clients() -> list[ESIClient]:
+    """Get ESIClient instances for all authenticated characters."""
+    config = _get_config()
+    from eve_esi.auth import TokenStore
+    store = TokenStore(config.token_storage.path)
+    chars = store.get_all()
+    clients = []
+    for cid in chars:
+        if cid not in _clients:
+            _clients[cid] = ESIClient(config, cid)
+        clients.append(_clients[cid])
+    return clients
 
 
 # ──────────────────────────────────────────────
@@ -63,7 +83,10 @@ def _get_client(character_id: int | None = None) -> ESIClient:
 
 @mcp.tool()
 def list_authenticated_characters() -> str:
-    """List all EVE characters that have been authenticated with this tool."""
+    """List all authenticated EVE characters with their status.
+
+    Shows character ID, name, corporation, current location, ship, wallet,
+    token status, and whether they are the active character."""
     config = _get_config()
     from eve_esi.auth import TokenStore
     store = TokenStore(config.token_storage.path)
@@ -72,8 +95,55 @@ def list_authenticated_characters() -> str:
         return "No authenticated characters. Run `python cli.py login` to add one."
     result = []
     for cid, token in chars.items():
-        result.append({"character_id": cid, "character_name": token.character_name})
+        entry: dict[str, Any] = {
+            "character_id": cid,
+            "character_name": token.character_name,
+            "is_active": cid == _active_character_id,
+            "token_valid": not token.is_expired,
+        }
+        # Try to enrich with live data (best-effort)
+        try:
+            client = _get_client(cid)
+            loc = characters.get_character_location(client)
+            if "solar_system_id" in loc:
+                sys_info = universe.get_system_info(client, loc["solar_system_id"])
+                entry["location"] = sys_info.get("name", str(loc["solar_system_id"]))
+            ship = characters.get_character_ship(client)
+            if "ship_type_id" in ship:
+                type_info = universe.get_type_info(client, ship["ship_type_id"])
+                entry["ship"] = type_info.get("name", "Unknown")
+                entry["ship_name"] = ship.get("ship_name", "")
+            entry["wallet_isk"] = wallet.get_wallet_balance(client)
+        except Exception:
+            entry["location"] = "unavailable"
+        result.append(entry)
     return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def set_active_character(character_id: int) -> str:
+    """Set the active character that tools will use by default.
+
+    All tools that accept an optional character_id will use this character
+    when no character_id is explicitly provided.
+
+    Args:
+        character_id: The character ID to set as active.
+    """
+    global _active_character_id
+    config = _get_config()
+    from eve_esi.auth import TokenStore
+    store = TokenStore(config.token_storage.path)
+    chars = store.get_all()
+    if character_id not in chars:
+        return json.dumps({"error": f"Character {character_id} is not authenticated."})
+    _active_character_id = character_id
+    name = chars[character_id].character_name
+    return json.dumps({
+        "active_character_id": character_id,
+        "active_character_name": name,
+        "message": f"{name} is now the active character.",
+    }, indent=2)
 
 
 @mcp.tool()
@@ -411,6 +481,296 @@ def resolve_eve_names(ids: list[int]) -> str:
     client = _get_client()
     names = universe.resolve_names(client, ids)
     return json.dumps(names, indent=2)
+
+
+# ──────────────────────────────────────────────
+# High-Level Tools
+# ──────────────────────────────────────────────
+
+@mcp.tool()
+def get_character_status(character_id: int | None = None) -> str:
+    """Get a combined snapshot of the character: location, ship, and wallet balance."""
+    client = _get_client(character_id)
+    location = characters.get_character_location(client)
+    ship = characters.get_character_ship(client)
+    balance = wallet.get_wallet_balance(client)
+
+    # Resolve names
+    if "solar_system_id" in location:
+        try:
+            sys_info = universe.get_system_info(client, location["solar_system_id"])
+            location["solar_system_name"] = sys_info.get("name", "Unknown")
+        except Exception:
+            pass
+    if "ship_type_id" in ship:
+        try:
+            type_info = universe.get_type_info(client, ship["ship_type_id"])
+            ship["ship_type_name"] = type_info.get("name", "Unknown")
+        except Exception:
+            pass
+
+    return json.dumps({
+        "location": location,
+        "ship": ship,
+        "wallet_balance_isk": balance,
+    }, indent=2)
+
+
+@mcp.tool()
+def plan_route(
+    systems: list[int],
+    start: int = 30000142,
+    end: int | None = None,
+    flag: str = "shortest",
+) -> str:
+    """Plan an efficient multi-stop route between solar systems.
+
+    Uses nearest-neighbour heuristic to minimise total jumps.
+
+    Args:
+        systems: List of solar system IDs to visit.
+        start: Starting system (default: Jita 30000142).
+        end: Return-to system (defaults to start).
+        flag: 'shortest', 'secure', or 'insecure'.
+    """
+    client = _get_client()
+    result = navigation.plan_multi_stop_route(client, systems, start=start, end=end, flag=flag)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_assets_summary(character_id: int | None = None) -> str:
+    """Get assets grouped by location with names and estimated ISK values.
+
+    Much more useful than the raw asset list — shows totals per station."""
+    client = _get_client(character_id)
+    result = hauling.get_assets_summary_by_location(client)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def find_valuables_to_haul(
+    exclude_system: int = 30000142,
+    max_cargo_m3: float = 135.0,
+    min_value_isk: float = 500_000,
+    max_unit_volume: float = 10.0,
+    include_blueprints: bool = True,
+    route_flag: str = "shortest",
+    character_id: int | None = None,
+) -> str:
+    """Find valuable, portable items outside a home system and plan a pickup route.
+
+    Automatically resolves locations, fetches prices, packs cargo by ISK/m³,
+    and generates a nearest-neighbour route.
+
+    Args:
+        exclude_system: System to exclude from pickup (default: Jita).
+        max_cargo_m3: Available cargo space (e.g. 135 m³ for an Ares).
+        min_value_isk: Minimum value to consider for non-blueprint items.
+        max_unit_volume: Max packaged volume per unit for non-BP items.
+        include_blueprints: Whether to include BPOs/BPCs.
+        route_flag: 'shortest', 'secure', or 'insecure'.
+    """
+    client = _get_client(character_id)
+    result = hauling.find_portable_valuables(
+        client,
+        exclude_system=exclude_system,
+        max_cargo_m3=max_cargo_m3,
+        min_value_isk=min_value_isk,
+        max_unit_volume=max_unit_volume,
+        include_blueprints=include_blueprints,
+        route_flag=route_flag,
+    )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_ship_fit_stats(eft_text: str) -> str:
+    """Analyse a ship fitting from EFT format and return approximate stats.
+
+    Computes defense (HP, EHP, resistances), fitting (CPU/PG), navigation,
+    targeting, capacitor, mining yield, and cargo/ore hold.
+
+    Args:
+        eft_text: EFT-format fitting block, e.g.:
+            [Covetor, My Fit]
+            Mining Laser Upgrade II
+            ...
+    """
+    client = _get_client()
+    result = fitting_analysis.get_fit_stats(client, eft_text)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def compare_ship_fits(eft_text_a: str, eft_text_b: str) -> str:
+    """Compare two ship fittings side by side with delta values.
+
+    Takes two EFT-format fitting blocks and returns stats for each plus
+    a comparison with absolute and percentage differences.
+
+    Args:
+        eft_text_a: First fitting in EFT format.
+        eft_text_b: Second fitting in EFT format.
+    """
+    client = _get_client()
+    result = fitting_analysis.compare_fits(client, eft_text_a, eft_text_b)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_fit_required_skills(eft_text: str) -> str:
+    """Extract all skills required to fly a given ship fit.
+
+    Parses the EFT-format fitting, looks up each hull/module/rig/drone's
+    required skills from dogma attributes, and returns a deduplicated list
+    with the maximum level needed for each skill.
+
+    Args:
+        eft_text: Ship fitting in EFT format.
+    """
+    client = _get_client()
+    result = fitting_analysis.get_fit_required_skills(client, eft_text)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def check_fit_readiness(eft_text: str) -> str:
+    """Check which authenticated characters can fly a given fit.
+
+    For each character, shows whether they meet all skill requirements,
+    which skills they're missing entirely, and which are under-trained.
+
+    Args:
+        eft_text: Ship fitting in EFT format.
+    """
+    client = _get_client()
+    char_clients = _get_all_clients()
+    result = fitting_analysis.check_fit_readiness(client, eft_text, char_clients)
+    return json.dumps(result, indent=2)
+
+
+# ──────────────────────────────────────────────
+# Cross-Character Tools
+# ──────────────────────────────────────────────
+
+@mcp.tool()
+def get_all_characters_status() -> str:
+    """Get a combined status snapshot for ALL authenticated characters.
+
+    Returns location, ship, and wallet balance for every character in one call.
+    Useful for a quick overview of all your accounts."""
+    clients = _get_all_clients()
+    results = []
+    for client in clients:
+        entry: dict[str, Any] = {"character_id": client.character_id}
+        try:
+            cid = client.character_id
+            info = characters.get_character_info(client, cid)
+            entry["character_name"] = info.get("name", "Unknown")
+
+            loc = characters.get_character_location(client)
+            if "solar_system_id" in loc:
+                sys_info = universe.get_system_info(client, loc["solar_system_id"])
+                entry["system"] = sys_info.get("name", str(loc["solar_system_id"]))
+                entry["solar_system_id"] = loc["solar_system_id"]
+            if "station_id" in loc:
+                entry["station_id"] = loc["station_id"]
+
+            ship = characters.get_character_ship(client)
+            if "ship_type_id" in ship:
+                type_info = universe.get_type_info(client, ship["ship_type_id"])
+                entry["ship"] = type_info.get("name", "Unknown")
+                entry["ship_name"] = ship.get("ship_name", "")
+
+            entry["wallet_isk"] = wallet.get_wallet_balance(client)
+        except Exception as e:
+            entry["error"] = str(e)
+        results.append(entry)
+    return json.dumps(results, indent=2)
+
+
+@mcp.tool()
+def compare_skills_across_characters(skill_names: list[str] | None = None) -> str:
+    """Compare skills across all authenticated characters.
+
+    If skill_names is provided, only those skills are compared.
+    Otherwise compares total SP and top-level skill stats.
+
+    Args:
+        skill_names: Optional list of skill names to compare (e.g. ['Mining', 'Astrogeology']).
+    """
+    clients = _get_all_clients()
+    results = []
+
+    # Resolve skill name -> type_id if filter provided
+    target_skill_ids: set[int] | None = None
+    skill_id_to_name: dict[int, str] = {}
+    if skill_names:
+        ref_client = clients[0] if clients else _get_client()
+        id_results = universe.resolve_ids(ref_client, skill_names)
+        target_skill_ids = set()
+        for category in id_results.values():
+            if isinstance(category, list):
+                for item in category:
+                    if isinstance(item, dict) and "id" in item:
+                        target_skill_ids.add(item["id"])
+                        skill_id_to_name[item["id"]] = item.get("name", str(item["id"]))
+
+    for client in clients:
+        entry: dict[str, Any] = {"character_id": client.character_id}
+        try:
+            cid = client.character_id
+            info = characters.get_character_info(client, cid)
+            entry["character_name"] = info.get("name", "Unknown")
+
+            skill_data = skills.get_skills(client)
+            entry["total_sp"] = skill_data.get("total_sp", 0)
+            entry["unallocated_sp"] = skill_data.get("unallocated_sp", 0)
+
+            trained = skill_data.get("skills", [])
+            entry["skills_trained"] = len(trained)
+
+            if target_skill_ids is not None:
+                skill_map = {s["skill_id"]: s for s in trained}
+                matched = {}
+                for sid in target_skill_ids:
+                    name = skill_id_to_name.get(sid, str(sid))
+                    if sid in skill_map:
+                        matched[name] = {
+                            "level": skill_map[sid].get("active_skill_level", 0),
+                            "sp": skill_map[sid].get("skillpoints_in_skill", 0),
+                        }
+                    else:
+                        matched[name] = {"level": 0, "sp": 0}
+                entry["requested_skills"] = matched
+        except Exception as e:
+            entry["error"] = str(e)
+        results.append(entry)
+    return json.dumps(results, indent=2)
+
+
+@mcp.tool()
+def compare_wallets() -> str:
+    """Compare wallet balances across all authenticated characters.
+
+    Returns each character's ISK balance and a total."""
+    clients = _get_all_clients()
+    results = []
+    total = 0.0
+    for client in clients:
+        entry: dict[str, Any] = {"character_id": client.character_id}
+        try:
+            cid = client.character_id
+            info = characters.get_character_info(client, cid)
+            entry["character_name"] = info.get("name", "Unknown")
+            balance = wallet.get_wallet_balance(client)
+            entry["wallet_isk"] = balance
+            total += balance
+        except Exception as e:
+            entry["error"] = str(e)
+        results.append(entry)
+    return json.dumps({"characters": results, "total_isk": total}, indent=2)
 
 
 # ──────────────────────────────────────────────
